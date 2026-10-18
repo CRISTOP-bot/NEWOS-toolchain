@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Script validation and x86_64-elf smoke build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out toolchain source
+        uses: actions/checkout@v4
+        with:
+          path: NEWOS/toolchain
+
+      - name: Install validation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y clang lld shellcheck binutils
+
+      - name: Check shell syntax
+        working-directory: NEWOS
+        run: bash -n toolchain/build.sh toolchain/env.sh toolchain/test.sh
+
+      - name: Lint shell scripts
+        working-directory: NEWOS
+        run: shellcheck --severity=error toolchain/build.sh toolchain/env.sh toolchain/test.sh
+
+      - name: Compile and link freestanding x86_64-elf smoke programs
+        working-directory: NEWOS
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+
+          cat > "$tmp/kernel.c" <<'EOF'
+          __attribute__((section(".text")))
+          long kadd(long a, long b) { return a + b; }
+          EOF
+          cat > "$tmp/user.c" <<'EOF'
+          long uadd(long a, long b) { return a + b; }
+          int main(void) { return (int)uadd(40, 2); }
+          EOF
+
+          clang --target=x86_64-elf -c -O2 -ffreestanding -nostdlib \
+            -fno-pic -fno-pie -fno-builtin -mno-red-zone -mno-sse -mno-mmx \
+            -mcmodel=kernel -Wall -Werror "$tmp/kernel.c" -o "$tmp/kernel.o"
+          clang --target=x86_64-elf -c -O2 -ffreestanding -nostdlib \
+            -fno-pic -fno-pie -fno-builtin -Wall -Werror \
+            "$tmp/user.c" -o "$tmp/user.o"
+          ld.lld -m elf_x86_64 -n -static -nostdlib -e main \
+            -o "$tmp/user.elf" "$tmp/user.o"
+          test -s "$tmp/kernel.o"
+          test -s "$tmp/user.elf"
+          readelf -h "$tmp/user.elf" | grep -Eq 'Machine:.*Advanced Micro Devices X86-64'
